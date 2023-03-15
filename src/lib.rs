@@ -1,5 +1,5 @@
-use off64::Off64;
 use off64::usz;
+use off64::Off64;
 use seekable_async_file::SeekableAsyncFile;
 use seekable_async_file::WriteRequest;
 use signal_future::SignalFuture;
@@ -73,7 +73,9 @@ impl WriteJournal {
       journal_offset += 8;
       let data_len = raw.read_u32_be_at(journal_offset);
       journal_offset += 4;
-      let data = raw.read_slice_at_range(journal_offset..journal_offset + u64::from(data_len)).to_vec();
+      let data = raw
+        .read_slice_at_range(journal_offset..journal_offset + u64::from(data_len))
+        .to_vec();
       journal_offset += u64::from(data_len);
       self.device.write_at(offset, data).await;
     }
@@ -113,25 +115,19 @@ impl WriteJournal {
           raw.extend_from_slice(&data_len.to_be_bytes());
           raw.extend_from_slice(&data);
           len += entry_len;
-          writes.push(WriteRequest { data, offset });
+          writes.push(WriteRequest::new(offset, data));
           fut_ctls.push(fut_ctl)
         }
       };
       if writes.is_empty() {
         continue;
       };
-      raw.write_u32_be_at(
-        OFFSETOF_LEN,
-        u32::try_from(len).unwrap(),
-      );
+      raw.write_u32_be_at(OFFSETOF_LEN, u32::try_from(len).unwrap());
       let hash = blake3::hash(raw.read_slice_at_range(OFFSETOF_LEN..));
       raw.write_slice_at(OFFSETOF_HASH, hash.as_bytes());
       self
         .device
-        .write_at_with_delayed_sync(vec![WriteRequest {
-          data: raw,
-          offset: self.offset,
-        }])
+        .write_at_with_delayed_sync(vec![WriteRequest::new(self.offset, raw)])
         .await;
 
       self.device.write_at_with_delayed_sync(writes).await;
