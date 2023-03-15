@@ -1,0 +1,16 @@
+[package]
+name = "write-journal"
+version = "0.1.0"
+edition = "2021"
+description = "Write to files with a journal"
+license = "Apache-2.0"
+homepage = "https://github.com/wilsonzlin/write-journal"
+repository = "https://github.com/wilsonzlin/write-journal.git"
+authors = ["Wilson Lin <code@wilsonl.in>"]
+
+[dependencies]
+blake3 = "1"
+off64 = "0.0.2"
+seekable-async-file = "0.3"
+signal-future = "0.0.1"
+tokio = "1"
