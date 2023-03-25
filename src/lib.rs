@@ -96,10 +96,19 @@ impl WriteJournal {
 
   // Sometimes we want to ensure a bunch of writes at different offsets are atomically written as one, such that either all writes or none persist and not some of the writes only.
   pub async fn write(&self, atomic_group: AtomicWriteGroup) {
-    assert!(atomic_group.serialised_byte_len() <= self.capacity - OFFSETOF_ENTRIES);
     let (fut, fut_ctl) = SignalFuture::new();
-    self.pending.lock().await.push_back((atomic_group, fut_ctl));
+    self.write_with_custom_signal(atomic_group, fut_ctl).await;
     fut.await;
+  }
+
+  // For advanced usages only.
+  pub async fn write_with_custom_signal(
+    &self,
+    atomic_group: AtomicWriteGroup,
+    fut_ctl: SignalFutureController,
+  ) {
+    assert!(atomic_group.serialised_byte_len() <= self.capacity - OFFSETOF_ENTRIES);
+    self.pending.lock().await.push_back((atomic_group, fut_ctl));
   }
 
   pub async fn start_commit_background_loop(&self) {
