@@ -4,7 +4,7 @@ use seekable_async_file::SeekableAsyncFile;
 use seekable_async_file::WriteRequest;
 use signal_future::SignalFuture;
 use signal_future::SignalFutureController;
-use std::collections::LinkedList;
+use std::collections::VecDeque;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
@@ -12,11 +12,19 @@ const OFFSETOF_HASH: u64 = 0;
 const OFFSETOF_LEN: u64 = OFFSETOF_HASH + 32;
 const OFFSETOF_ENTRIES: u64 = OFFSETOF_LEN + 4;
 
+pub struct AtomicWriteGroup(pub Vec<(u64, Vec<u8>)>);
+
+impl AtomicWriteGroup {
+  fn serialised_byte_len(&self) -> u64 {
+    u64::try_from(self.0.iter().map(|w| 8 + 4 + w.1.len()).sum::<usize>()).unwrap()
+  }
+}
+
 pub struct WriteJournal {
   device: SeekableAsyncFile,
   offset: u64,
   capacity: u64,
-  pending: Mutex<LinkedList<(u64, Vec<u8>, SignalFutureController)>>,
+  pending: Mutex<VecDeque<(AtomicWriteGroup, SignalFutureController)>>,
 }
 
 impl WriteJournal {
@@ -26,7 +34,7 @@ impl WriteJournal {
       device,
       offset,
       capacity,
-      pending: Mutex::new(LinkedList::new()),
+      pending: Mutex::new(VecDeque::new()),
     }
   }
 
@@ -86,10 +94,11 @@ impl WriteJournal {
     self.device.sync_data().await;
   }
 
-  pub async fn write(&self, offset: u64, data: Vec<u8>) {
-    assert!(u64::try_from(data.len()).unwrap() <= self.capacity - 8 - OFFSETOF_ENTRIES);
+  // Sometimes we want to ensure a bunch of writes at different offsets are atomically written as one, such that either all writes or none persist and not some of the writes only.
+  pub async fn write(&self, atomic_group: AtomicWriteGroup) {
+    assert!(atomic_group.serialised_byte_len() <= self.capacity - OFFSETOF_ENTRIES);
     let (fut, fut_ctl) = SignalFuture::new();
-    self.pending.lock().await.push_back((offset, data, fut_ctl));
+    self.pending.lock().await.push_back((atomic_group, fut_ctl));
     fut.await;
   }
 
@@ -103,23 +112,24 @@ impl WriteJournal {
       let mut fut_ctls = Vec::new();
       {
         let mut pending = self.pending.lock().await;
-        while let Some(e) = pending.pop_front() {
-          let entry_len = 8 + 4 + u64::try_from(e.1.len()).unwrap();
+        while let Some((group, fut_ctl)) = pending.pop_front() {
+          let entry_len = group.serialised_byte_len();
           if len + entry_len > self.capacity - OFFSETOF_ENTRIES {
-            pending.push_front(e);
+            pending.push_front((group, fut_ctl));
             break;
           };
-          let (offset, data, fut_ctl) = e;
-          let data_len: u32 = data.len().try_into().unwrap();
-          raw.extend_from_slice(&offset.to_be_bytes());
-          raw.extend_from_slice(&data_len.to_be_bytes());
-          raw.extend_from_slice(&data);
-          len += entry_len;
-          writes.push(WriteRequest::new(offset, data));
-          fut_ctls.push(fut_ctl)
+          for (offset, data) in group.0 {
+            let data_len: u32 = data.len().try_into().unwrap();
+            raw.extend_from_slice(&offset.to_be_bytes());
+            raw.extend_from_slice(&data_len.to_be_bytes());
+            raw.extend_from_slice(&data);
+            len += entry_len;
+            writes.push(WriteRequest::new(offset, data));
+          }
+          fut_ctls.push(fut_ctl);
         }
       };
-      if writes.is_empty() {
+      if fut_ctls.is_empty() {
         continue;
       };
       raw.write_u32_be_at(OFFSETOF_LEN, u32::try_from(len).unwrap());
