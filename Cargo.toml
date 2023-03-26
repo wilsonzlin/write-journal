@@ -10,7 +10,7 @@ authors = ["Wilson Lin <code@wilsonl.in>"]
 
 [dependencies]
 blake3 = "1"
-off64 = "0.1"
+off64 = "0.3"
 seekable-async-file = "0.5"
 signal-future = "0.0.1"
 tokio = "1"

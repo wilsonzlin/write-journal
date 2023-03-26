@@ -1,5 +1,6 @@
 use off64::usz;
-use off64::Off64;
+use off64::Off64Int;
+use off64::Off64Slice;
 use seekable_async_file::SeekableAsyncFile;
 use seekable_async_file::WriteRequest;
 use signal_future::SignalFuture;
