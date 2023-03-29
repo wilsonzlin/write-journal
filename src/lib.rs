@@ -8,6 +8,8 @@ use signal_future::SignalFutureController;
 use std::collections::VecDeque;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
+use tracing::info;
+use tracing::warn;
 
 const OFFSETOF_HASH: u64 = 0;
 const OFFSETOF_LEN: u64 = OFFSETOF_HASH + 32;
@@ -58,7 +60,7 @@ impl WriteJournal {
     let mut raw = self.device.read_at(self.offset, OFFSETOF_ENTRIES).await;
     let len: u64 = raw.read_u32_be_at(OFFSETOF_LEN).into();
     if len > self.capacity - OFFSETOF_ENTRIES {
-      // TODO Warn?
+      warn!("journal is corrupt, has invalid length, skipping recovery");
       return;
     };
     raw.append(
@@ -70,12 +72,14 @@ impl WriteJournal {
     let expected_hash = blake3::hash(raw.read_slice_at_range(OFFSETOF_LEN..));
     let recorded_hash = raw.read_slice_at_range(..OFFSETOF_LEN);
     if expected_hash.as_bytes() != recorded_hash {
-      // TODO Warn?
+      warn!("journal is corrupt, has invalid hash, skipping recovery");
       return;
     };
     if len == 0 {
+      info!("journal is empty, no recovery necessary");
       return;
     };
+    let mut recovered_bytes_total = 0;
     let mut journal_offset = OFFSETOF_ENTRIES;
     while journal_offset < len {
       let offset = raw.read_u64_be_at(journal_offset);
@@ -87,12 +91,18 @@ impl WriteJournal {
         .to_vec();
       journal_offset += u64::from(data_len);
       self.device.write_at(offset, data).await;
+      recovered_bytes_total += data_len;
     }
     self
       .device
       .write_at(self.offset, self.generate_blank_state())
       .await;
     self.device.sync_data().await;
+    info!(
+      recovered_entries = len,
+      recovered_bytes = recovered_bytes_total,
+      "journal has been recovered"
+    );
   }
 
   // Sometimes we want to ensure a bunch of writes at different offsets are atomically written as one, such that either all writes or none persist and not some of the writes only.
