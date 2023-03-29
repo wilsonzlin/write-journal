@@ -118,8 +118,21 @@ impl WriteJournal {
     atomic_group: AtomicWriteGroup,
     fut_ctl: SignalFutureController,
   ) {
-    assert!(atomic_group.serialised_byte_len() <= self.capacity - OFFSETOF_ENTRIES);
-    self.pending.lock().await.push_back((atomic_group, fut_ctl));
+    self
+      .write_many_with_custom_signal(vec![(atomic_group, fut_ctl)])
+      .await
+  }
+
+  // For advanced usages only. More efficient as it only acquires lock once.
+  pub async fn write_many_with_custom_signal(
+    &self,
+    writes: Vec<(AtomicWriteGroup, SignalFutureController)>,
+  ) {
+    let mut pending = self.pending.lock().await;
+    for w in writes {
+      assert!(w.0.serialised_byte_len() <= self.capacity - OFFSETOF_ENTRIES);
+      pending.push_back(w);
+    }
   }
 
   pub async fn start_commit_background_loop(&self) {
