@@ -108,23 +108,23 @@ impl WriteJournal {
   // Sometimes we want to ensure a bunch of writes at different offsets are atomically written as one, such that either all writes or none persist and not some of the writes only.
   pub async fn write(&self, atomic_group: AtomicWriteGroup) {
     let (fut, fut_ctl) = SignalFuture::new();
-    self.write_with_custom_signal(atomic_group, fut_ctl).await;
+    self.enqueue_with_custom_signal(atomic_group, fut_ctl).await;
     fut.await;
   }
 
-  // For advanced usages only.
-  pub async fn write_with_custom_signal(
+  // For advanced usages only. This is async only to acquire the internal lock, not to actually perform commit.
+  pub async fn enqueue_with_custom_signal(
     &self,
     atomic_group: AtomicWriteGroup,
     fut_ctl: SignalFutureController,
   ) {
     self
-      .write_many_with_custom_signal(vec![(atomic_group, fut_ctl)])
+      .enqueue_many_with_custom_signal(vec![(atomic_group, fut_ctl)])
       .await
   }
 
-  // For advanced usages only. More efficient as it only acquires lock once.
-  pub async fn write_many_with_custom_signal(
+  // For advanced usages only. This is async only to acquire the internal lock, not to actually perform commits. More efficient as it only acquires lock once.
+  pub async fn enqueue_many_with_custom_signal(
     &self,
     writes: Vec<(AtomicWriteGroup, SignalFutureController)>,
   ) {
