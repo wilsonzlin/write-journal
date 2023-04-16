@@ -10,11 +10,11 @@ If action `fn` performs mutations on subsystems `A`, `B`, and `C`, then if only 
 
 ## Why use locks outside of journal?
 
-If `A`, `B`, and `C` must be done together and atomically, why not just lock the journal for the entire time anyway? Because this doesn't allow for more efficient code that is safe and possible, such as more relaxed granular locks, atomics, and pipelining. For example, if the journal was locked, the operations would look like:
+If `A`, `B`, and `C` must be done together and atomically, why not just lock the journal for the entire time anyway? This would guarantee thread safety and atomicity across all subsystems without much effort, and also ensure that all reads are only ever done after the data has fully persisted to the device, so there are no data read/write race conditions. For example, if the journal was locked, the operations would look like:
 
 ![Flow diagram](./flow-journal-locked.svg)
 
-With more granular locks, such as per subsystem, it could look like:
+However, this doesn't allow for more efficient code that is safe and possible, such as more relaxed granular locks, atomics, and pipelining. With more granular locks, such as per subsystem, it could look like:
 
 ![Flow diagram](./flow-subsystem-pipelining.svg)
 
