@@ -6,11 +6,11 @@ This should be obvious.
 
 ## Why use atomic write groups?
 
-If action `fn` performs mutations on subsystems `A`, `B`, `C`, and `D`, then if only `A` and `B` successfully persist and `C` and `D` changes are lost, the device is most likely left in a corrupted irrecoverable state, even if each individual subsystem change is applied atomically.
+If action `fn` performs mutations on subsystems `A`, `B`, and `C`, then if only `A` and `B` successfully persist and `C`'s changes are lost, the device is most likely left in a corrupted irrecoverable state, even if each individual subsystem change is applied atomically.
 
 ## Why use locks outside of journal?
 
-If `A`, `B`, `C`, and `D` must be done together and atomically, why not just lock the journal for the entire time anyway? Because this doesn't allow for more efficient code that is safe and possible, such as more relaxed granular locks, atomics, and pipelining. For example, if the journal was locked, the operations would look like:
+If `A`, `B`, and `C` must be done together and atomically, why not just lock the journal for the entire time anyway? Because this doesn't allow for more efficient code that is safe and possible, such as more relaxed granular locks, atomics, and pipelining. For example, if the journal was locked, the operations would look like:
 
 ![Flow diagram](./flow-journal-locked.svg)
 
