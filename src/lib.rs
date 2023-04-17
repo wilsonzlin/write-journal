@@ -1,12 +1,14 @@
+use dashmap::DashMap;
 use off64::usz;
 use off64::Off64Int;
 use off64::Off64Slice;
+use rustc_hash::FxHasher;
 use seekable_async_file::SeekableAsyncFile;
 use seekable_async_file::WriteRequest;
 use signal_future::SignalFuture;
 use signal_future::SignalFutureController;
-use std::collections::VecDeque;
-use tokio::sync::Mutex;
+use std::hash::BuildHasherDefault;
+use std::sync::atomic::AtomicU64;
 use tokio::time::sleep;
 use tracing::info;
 use tracing::warn;
@@ -15,11 +17,19 @@ const OFFSETOF_HASH: u64 = 0;
 const OFFSETOF_LEN: u64 = OFFSETOF_HASH + 32;
 const OFFSETOF_ENTRIES: u64 = OFFSETOF_LEN + 4;
 
-pub struct AtomicWriteGroup(pub Vec<(u64, Vec<u8>)>);
+pub struct Transaction {
+  serial_no: u64,
+  writes: Vec<(u64, Vec<u8>)>,
+}
 
-impl AtomicWriteGroup {
+impl Transaction {
   fn serialised_byte_len(&self) -> u64 {
-    u64::try_from(self.0.iter().map(|w| 8 + 4 + w.1.len()).sum::<usize>()).unwrap()
+    u64::try_from(self.writes.iter().map(|w| 8 + 4 + w.1.len()).sum::<usize>()).unwrap()
+  }
+
+  pub fn write(&mut self, offset: u64, data: Vec<u8>) -> &mut Self {
+    self.writes.push((offset, data));
+    self
   }
 }
 
@@ -27,7 +37,8 @@ pub struct WriteJournal {
   device: SeekableAsyncFile,
   offset: u64,
   capacity: u64,
-  pending: Mutex<VecDeque<(AtomicWriteGroup, SignalFutureController)>>,
+  pending: DashMap<u64, (Transaction, SignalFutureController), BuildHasherDefault<FxHasher>>,
+  next_txn_serial_no: AtomicU64,
 }
 
 impl WriteJournal {
@@ -37,7 +48,8 @@ impl WriteJournal {
       device,
       offset,
       capacity,
-      pending: Mutex::new(VecDeque::new()),
+      pending: Default::default(),
+      next_txn_serial_no: AtomicU64::new(0),
     }
   }
 
@@ -105,37 +117,27 @@ impl WriteJournal {
     );
   }
 
-  // Sometimes we want to ensure a bunch of writes at different offsets are atomically written as one, such that either all writes or none persist and not some of the writes only.
-  pub async fn write(&self, atomic_group: AtomicWriteGroup) {
-    let (fut, fut_ctl) = SignalFuture::new();
-    self.enqueue_with_custom_signal(atomic_group, fut_ctl).await;
-    fut.await;
-  }
-
-  // For advanced usages only. This is async only to acquire the internal lock, not to actually perform commit.
-  pub async fn enqueue_with_custom_signal(
-    &self,
-    atomic_group: AtomicWriteGroup,
-    fut_ctl: SignalFutureController,
-  ) {
-    self
-      .enqueue_many_with_custom_signal(vec![(atomic_group, fut_ctl)])
-      .await
-  }
-
-  // For advanced usages only. This is async only to acquire the internal lock, not to actually perform commits. More efficient as it only acquires lock once.
-  pub async fn enqueue_many_with_custom_signal(
-    &self,
-    writes: Vec<(AtomicWriteGroup, SignalFutureController)>,
-  ) {
-    let mut pending = self.pending.lock().await;
-    for w in writes {
-      assert!(w.0.serialised_byte_len() <= self.capacity - OFFSETOF_ENTRIES);
-      pending.push_back(w);
+  pub fn begin_transaction(&self) -> Transaction {
+    let serial_no = self
+      .next_txn_serial_no
+      .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Transaction {
+      serial_no,
+      writes: Vec::new(),
     }
   }
 
+  pub async fn commit(&self, txn: Transaction) {
+    let (fut, fut_ctl) = SignalFuture::new();
+    let None = self.pending.insert(txn.serial_no, (txn, fut_ctl)) else {
+      unreachable!();
+    };
+    fut.await;
+  }
+
   pub async fn start_commit_background_loop(&self) {
+    let mut next_serial = 0;
+
     loop {
       sleep(std::time::Duration::from_micros(200)).await;
 
@@ -143,25 +145,27 @@ impl WriteJournal {
       let mut raw = vec![0u8; usz!(OFFSETOF_ENTRIES)];
       let mut writes = Vec::new();
       let mut fut_ctls = Vec::new();
-      {
-        let mut pending = self.pending.lock().await;
-        while let Some((group, fut_ctl)) = pending.pop_front() {
-          let entry_len = group.serialised_byte_len();
-          if len + entry_len > self.capacity - OFFSETOF_ENTRIES {
-            pending.push_front((group, fut_ctl));
-            break;
+      // We must `remove` to take ownership of the write data and avoid copying. But this means we need to reinsert into the map if we cannot process a transaction in this iteration.
+      while let Some((serial_no, (txn, fut_ctl))) = self.pending.remove(&next_serial) {
+        let entry_len = txn.serialised_byte_len();
+        if len + entry_len > self.capacity - OFFSETOF_ENTRIES {
+          // Out of space, wait until next iteration.
+          let None = self.pending.insert(serial_no, (txn, fut_ctl)) else {
+            unreachable!();
           };
-          for (offset, data) in group.0 {
-            let data_len: u32 = data.len().try_into().unwrap();
-            raw.extend_from_slice(&offset.to_be_bytes());
-            raw.extend_from_slice(&data_len.to_be_bytes());
-            raw.extend_from_slice(&data);
-            len += entry_len;
-            writes.push(WriteRequest::new(offset, data));
-          }
-          fut_ctls.push(fut_ctl);
+          break;
+        };
+        next_serial += 1;
+        for (offset, data) in txn.writes {
+          let data_len: u32 = data.len().try_into().unwrap();
+          raw.extend_from_slice(&offset.to_be_bytes());
+          raw.extend_from_slice(&data_len.to_be_bytes());
+          raw.extend_from_slice(&data);
+          len += entry_len;
+          writes.push(WriteRequest::new(offset, data));
         }
-      };
+        fut_ctls.push(fut_ctl);
+      }
       if fut_ctls.is_empty() {
         continue;
       };
