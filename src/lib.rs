@@ -9,6 +9,7 @@ use signal_future::SignalFuture;
 use signal_future::SignalFutureController;
 use std::hash::BuildHasherDefault;
 use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
 use tracing::warn;
@@ -39,10 +40,16 @@ pub struct WriteJournal {
   capacity: u64,
   pending: DashMap<u64, (Transaction, SignalFutureController), BuildHasherDefault<FxHasher>>,
   next_txn_serial_no: AtomicU64,
+  commit_delay: Duration,
 }
 
 impl WriteJournal {
-  pub fn new(device: SeekableAsyncFile, offset: u64, capacity: u64) -> Self {
+  pub fn new(
+    device: SeekableAsyncFile,
+    offset: u64,
+    capacity: u64,
+    commit_delay: Duration,
+  ) -> Self {
     assert!(capacity > OFFSETOF_ENTRIES && capacity <= u32::MAX.into());
     Self {
       device,
@@ -50,6 +57,7 @@ impl WriteJournal {
       capacity,
       pending: Default::default(),
       next_txn_serial_no: AtomicU64::new(0),
+      commit_delay,
     }
   }
 
@@ -139,7 +147,7 @@ impl WriteJournal {
     let mut next_serial = 0;
 
     loop {
-      sleep(std::time::Duration::from_micros(200)).await;
+      sleep(self.commit_delay).await;
 
       let mut len = 0;
       let mut raw = vec![0u8; usz!(OFFSETOF_ENTRIES)];
