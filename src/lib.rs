@@ -9,6 +9,7 @@ use signal_future::SignalFuture;
 use signal_future::SignalFutureController;
 use std::hash::BuildHasherDefault;
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
@@ -18,20 +19,61 @@ const OFFSETOF_HASH: u64 = 0;
 const OFFSETOF_LEN: u64 = OFFSETOF_HASH + 32;
 const OFFSETOF_ENTRIES: u64 = OFFSETOF_LEN + 4;
 
+struct TransactionWrite {
+  offset: u64,
+  data: Vec<u8>,
+  is_overlay: bool,
+}
+
 pub struct Transaction {
   serial_no: u64,
-  writes: Vec<(u64, Vec<u8>)>,
+  writes: Vec<TransactionWrite>,
+  overlay: Arc<DashMap<u64, OverlayEntry, BuildHasherDefault<FxHasher>>>,
+  overlay_window_size: u64,
 }
 
 impl Transaction {
   fn serialised_byte_len(&self) -> u64 {
-    u64::try_from(self.writes.iter().map(|w| 8 + 4 + w.1.len()).sum::<usize>()).unwrap()
+    u64::try_from(
+      self
+        .writes
+        .iter()
+        .map(|w| 8 + 4 + w.data.len())
+        .sum::<usize>(),
+    )
+    .unwrap()
   }
 
   pub fn write(&mut self, offset: u64, data: Vec<u8>) -> &mut Self {
-    self.writes.push((offset, data));
+    self.writes.push(TransactionWrite {
+      offset,
+      data,
+      is_overlay: false,
+    });
     self
   }
+
+  /// WARNING: Use this function with caution, it's up to the caller to avoid the potential issues with misuse, including logic incorrectness, cache incoherency, and memory leaking. Carefully read notes/Flow.md before using the overlay.
+  pub fn write_with_overlay(&mut self, offset: u64, data: Vec<u8>) -> &mut Self {
+    assert_eq!(data.len(), usz!(self.overlay_window_size));
+    self.overlay.insert(offset, OverlayEntry {
+      data: data.clone(),
+      serial_no: self.serial_no,
+    });
+    self.writes.push(TransactionWrite {
+      offset,
+      data,
+      is_overlay: true,
+    });
+    self
+  }
+}
+
+// We cannot evict an overlay entry after a commit loop iteration if the data at the offset has since been updated again using the overlay while the commit loop was happening. This is why we need to track `serial_no`. This mechanism requires slower one-by-one deletes by the commit loop, but allows much faster parallel overlay reads with a DashMap. The alternative would be a RwLock over two maps, one for each generation, swapping them around after each loop iteration.
+// Note that it's not necessary to ever evict for correctness (assuming the overlay is used correctly); eviction is done to avoid memory leaking.
+struct OverlayEntry {
+  data: Vec<u8>,
+  serial_no: u64,
 }
 
 pub struct WriteJournal {
@@ -41,6 +83,8 @@ pub struct WriteJournal {
   pending: DashMap<u64, (Transaction, SignalFutureController), BuildHasherDefault<FxHasher>>,
   next_txn_serial_no: AtomicU64,
   commit_delay: Duration,
+  overlay: Arc<DashMap<u64, OverlayEntry, BuildHasherDefault<FxHasher>>>,
+  overlay_window_size: u64,
 }
 
 impl WriteJournal {
@@ -49,6 +93,7 @@ impl WriteJournal {
     offset: u64,
     capacity: u64,
     commit_delay: Duration,
+    overlay_window_size: u64,
   ) -> Self {
     assert!(capacity > OFFSETOF_ENTRIES && capacity <= u32::MAX.into());
     Self {
@@ -58,6 +103,8 @@ impl WriteJournal {
       pending: Default::default(),
       next_txn_serial_no: AtomicU64::new(0),
       commit_delay,
+      overlay: Default::default(),
+      overlay_window_size,
     }
   }
 
@@ -132,6 +179,8 @@ impl WriteJournal {
     Transaction {
       serial_no,
       writes: Vec::new(),
+      overlay: self.overlay.clone(),
+      overlay_window_size: self.overlay_window_size,
     }
   }
 
@@ -141,6 +190,15 @@ impl WriteJournal {
       unreachable!();
     };
     fut.await;
+  }
+
+  /// WARNING: Use this function with caution, it's up to the caller to avoid the potential issues with misuse, including logic incorrectness, cache incoherency, and memory leaking. Carefully read notes/Flow.md before using the overlay.
+  pub async fn read_with_overlay(&self, offset: u64) -> Vec<u8> {
+    if let Some(e) = self.overlay.get(&offset) {
+      e.value().data.clone()
+    } else {
+      self.device.read_at(offset, self.overlay_window_size).await
+    }
   }
 
   pub async fn start_commit_background_loop(&self) {
@@ -153,6 +211,7 @@ impl WriteJournal {
       let mut raw = vec![0u8; usz!(OFFSETOF_ENTRIES)];
       let mut writes = Vec::new();
       let mut fut_ctls = Vec::new();
+      let mut overlays_to_delete = Vec::new();
       // We must `remove` to take ownership of the write data and avoid copying. But this means we need to reinsert into the map if we cannot process a transaction in this iteration.
       while let Some((serial_no, (txn, fut_ctl))) = self.pending.remove(&next_serial) {
         let entry_len = txn.serialised_byte_len();
@@ -164,13 +223,16 @@ impl WriteJournal {
           break;
         };
         next_serial += 1;
-        for (offset, data) in txn.writes {
-          let data_len: u32 = data.len().try_into().unwrap();
-          raw.extend_from_slice(&offset.to_be_bytes());
+        for w in txn.writes {
+          let data_len: u32 = w.data.len().try_into().unwrap();
+          raw.extend_from_slice(&w.offset.to_be_bytes());
           raw.extend_from_slice(&data_len.to_be_bytes());
-          raw.extend_from_slice(&data);
+          raw.extend_from_slice(&w.data);
           len += entry_len;
-          writes.push(WriteRequest::new(offset, data));
+          writes.push(WriteRequest::new(w.offset, w.data));
+          if w.is_overlay {
+            overlays_to_delete.push((w.offset, serial_no));
+          };
         }
         fut_ctls.push(fut_ctl);
       }
@@ -189,6 +251,12 @@ impl WriteJournal {
 
       for fut_ctl in fut_ctls {
         fut_ctl.signal();
+      }
+
+      for (offset, serial_no) in overlays_to_delete {
+        self
+          .overlay
+          .remove_if(&offset, |_, e| e.serial_no <= serial_no);
       }
 
       // We cannot write_at_with_delayed_sync, as we may write to the journal again by then and have a conflict due to reordering.
