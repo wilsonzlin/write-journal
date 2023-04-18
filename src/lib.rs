@@ -29,7 +29,6 @@ pub struct Transaction {
   serial_no: u64,
   writes: Vec<TransactionWrite>,
   overlay: Arc<DashMap<u64, OverlayEntry, BuildHasherDefault<FxHasher>>>,
-  overlay_window_size: u64,
 }
 
 impl Transaction {
@@ -53,9 +52,8 @@ impl Transaction {
     self
   }
 
-  /// WARNING: Use this function with caution, it's up to the caller to avoid the potential issues with misuse, including logic incorrectness, cache incoherency, and memory leaking. Carefully read notes/Flow.md before using the overlay.
+  /// WARNING: Use this function with caution, it's up to the caller to avoid the potential issues with misuse, including logic incorrectness, cache incoherency, and memory leaking. Carefully read notes/Overlay.md before using the overlay.
   pub fn write_with_overlay(&mut self, offset: u64, data: Vec<u8>) -> &mut Self {
-    assert_eq!(data.len(), usz!(self.overlay_window_size));
     self.overlay.insert(offset, OverlayEntry {
       data: data.clone(),
       serial_no: self.serial_no,
@@ -84,7 +82,6 @@ pub struct WriteJournal {
   next_txn_serial_no: AtomicU64,
   commit_delay: Duration,
   overlay: Arc<DashMap<u64, OverlayEntry, BuildHasherDefault<FxHasher>>>,
-  overlay_window_size: u64,
 }
 
 impl WriteJournal {
@@ -93,7 +90,6 @@ impl WriteJournal {
     offset: u64,
     capacity: u64,
     commit_delay: Duration,
-    overlay_window_size: u64,
   ) -> Self {
     assert!(capacity > OFFSETOF_ENTRIES && capacity <= u32::MAX.into());
     Self {
@@ -104,7 +100,6 @@ impl WriteJournal {
       next_txn_serial_no: AtomicU64::new(0),
       commit_delay,
       overlay: Default::default(),
-      overlay_window_size,
     }
   }
 
@@ -180,7 +175,6 @@ impl WriteJournal {
       serial_no,
       writes: Vec::new(),
       overlay: self.overlay.clone(),
-      overlay_window_size: self.overlay_window_size,
     }
   }
 
@@ -192,12 +186,13 @@ impl WriteJournal {
     fut.await;
   }
 
-  /// WARNING: Use this function with caution, it's up to the caller to avoid the potential issues with misuse, including logic incorrectness, cache incoherency, and memory leaking. Carefully read notes/Flow.md before using the overlay.
-  pub async fn read_with_overlay(&self, offset: u64) -> Vec<u8> {
+  /// WARNING: Use this function with caution, it's up to the caller to avoid the potential issues with misuse, including logic incorrectness, cache incoherency, and memory leaking. Carefully read notes/Overlay.md before using the overlay.
+  pub async fn read_with_overlay(&self, offset: u64, len: u64) -> Vec<u8> {
     if let Some(e) = self.overlay.get(&offset) {
+      assert_eq!(e.value().data.len(), usz!(len));
       e.value().data.clone()
     } else {
-      self.device.read_at(offset, self.overlay_window_size).await
+      self.device.read_at(offset, len).await
     }
   }
 
