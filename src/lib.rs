@@ -178,7 +178,7 @@ impl WriteJournal {
     }
   }
 
-  pub async fn commit(&self, txn: Transaction) {
+  pub async fn commit_transaction(&self, txn: Transaction) {
     let (fut, fut_ctl) = SignalFuture::new();
     let None = self.pending.insert(txn.serial_no, (txn, fut_ctl)) else {
       unreachable!();
