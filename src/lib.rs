@@ -196,6 +196,11 @@ impl WriteJournal {
     }
   }
 
+  /// WARNING: Use this function with caution, it's up to the caller to avoid the potential issues with misuse, including logic incorrectness, cache incoherency, and memory leaking. Carefully read notes/Overlay.md before using the overlay.
+  pub async fn clear_from_overlay(&self, offset: u64) {
+    self.overlay.remove(&offset);
+  }
+
   pub async fn start_commit_background_loop(&self) {
     let mut next_serial = 0;
 
