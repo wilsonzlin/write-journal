@@ -11,10 +11,9 @@ authors = ["Wilson Lin <code@wilsonl.in>"]
 [dependencies]
 blake3 = "1"
 dashmap = "5.4.0"
-off64 = "0.3"
-parking_lot = "0.12.1"
+off64 = "0.6"
 rustc-hash = "1.1.0"
-seekable-async-file = "0.5"
+seekable-async-file = "0.8"
 signal-future = "0.0.1"
 tokio = "1"
 tracing = "0.1.37"

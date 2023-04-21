@@ -1,7 +1,9 @@
 use dashmap::DashMap;
+use off64::int::Off64ReadInt;
+use off64::int::Off64WriteMutInt;
 use off64::usz;
-use off64::Off64Int;
-use off64::Off64Slice;
+use off64::Off64Read;
+use off64::Off64WriteMut;
 use rustc_hash::FxHasher;
 use seekable_async_file::SeekableAsyncFile;
 use seekable_async_file::WriteRequest;
@@ -106,8 +108,8 @@ impl WriteJournal {
   pub fn generate_blank_state(&self) -> Vec<u8> {
     let mut raw = vec![0u8; usz!(OFFSETOF_ENTRIES)];
     raw.write_u32_be_at(OFFSETOF_LEN, 0u32);
-    let hash = blake3::hash(raw.read_slice_at_range(OFFSETOF_LEN..));
-    raw.write_slice_at(OFFSETOF_HASH, hash.as_bytes());
+    let hash = blake3::hash(&raw[usz!(OFFSETOF_LEN)..]);
+    raw.write_at(OFFSETOF_HASH, hash.as_bytes());
     raw
   }
 
@@ -128,11 +130,11 @@ impl WriteJournal {
     raw.append(
       &mut self
         .device
-        .read_at(self.offset + OFFSETOF_ENTRIES, len.into())
+        .read_at(self.offset + OFFSETOF_ENTRIES, len)
         .await,
     );
-    let expected_hash = blake3::hash(raw.read_slice_at_range(OFFSETOF_LEN..));
-    let recorded_hash = raw.read_slice_at_range(..OFFSETOF_LEN);
+    let expected_hash = blake3::hash(&raw[usz!(OFFSETOF_LEN)..]);
+    let recorded_hash = &raw[..usz!(OFFSETOF_LEN)];
     if expected_hash.as_bytes() != recorded_hash {
       warn!("journal is corrupt, has invalid hash, skipping recovery");
       return;
@@ -148,9 +150,7 @@ impl WriteJournal {
       journal_offset += 8;
       let data_len = raw.read_u32_be_at(journal_offset);
       journal_offset += 4;
-      let data = raw
-        .read_slice_at_range(journal_offset..journal_offset + u64::from(data_len))
-        .to_vec();
+      let data = raw.read_at(journal_offset, data_len.into()).to_vec();
       journal_offset += u64::from(data_len);
       self.device.write_at(offset, data).await;
       recovered_bytes_total += data_len;
@@ -240,8 +240,8 @@ impl WriteJournal {
         continue;
       };
       raw.write_u32_be_at(OFFSETOF_LEN, u32::try_from(len).unwrap());
-      let hash = blake3::hash(raw.read_slice_at_range(OFFSETOF_LEN..));
-      raw.write_slice_at(OFFSETOF_HASH, hash.as_bytes());
+      let hash = blake3::hash(&raw[usz!(OFFSETOF_LEN)..]);
+      raw.write_at(OFFSETOF_HASH, hash.as_bytes());
       self
         .device
         .write_at_with_delayed_sync(vec![WriteRequest::new(self.offset, raw)])
