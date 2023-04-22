@@ -228,12 +228,12 @@ impl WriteJournal {
           raw.extend_from_slice(&w.offset.to_be_bytes());
           raw.extend_from_slice(&data_len.to_be_bytes());
           raw.extend_from_slice(&w.data);
-          len += entry_len;
           writes.push(WriteRequest::new(w.offset, w.data));
           if w.is_overlay {
             overlays_to_delete.push((w.offset, serial_no));
           };
         }
+        len += entry_len;
         fut_ctls.push(fut_ctl);
       }
       if fut_ctls.is_empty() {
