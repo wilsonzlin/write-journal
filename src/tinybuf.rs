@@ -17,7 +17,7 @@ const ARRAY_CAP: usize = WORD_SIZE * 4 - 2;
 pub enum TinyBuf {
   // TODO Could we somehoww reuse the enum discriminant byte for the length, perhaps using `union`?
   Array(u8, [u8; ARRAY_CAP]),
-  BoxDyn(Box<dyn AsRef<[u8]> + Send + 'static>),
+  BoxDyn(Box<dyn AsRef<[u8]> + Send + Sync + 'static>),
   BoxSlice(Box<[u8]>),
   Static(&'static [u8]),
   // This is separate from the Box variants as converting Vec to Box using `into_boxed_slice` will require a reallocation unless capacity is exactly the same as the length.
@@ -109,8 +109,8 @@ impl<const N: usize> From<[u8; N]> for TinyBuf {
   }
 }
 
-impl From<Box<dyn AsRef<[u8]> + Send + 'static>> for TinyBuf {
-  fn from(value: Box<dyn AsRef<[u8]> + Send + 'static>) -> Self {
+impl From<Box<dyn AsRef<[u8]> + Send + Sync + 'static>> for TinyBuf {
+  fn from(value: Box<dyn AsRef<[u8]> + Send + Sync + 'static>) -> Self {
     Self::BoxDyn(value)
   }
 }
