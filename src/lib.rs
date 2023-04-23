@@ -189,7 +189,12 @@ impl WriteJournal {
   /// WARNING: Use this function with caution, it's up to the caller to avoid the potential issues with misuse, including logic incorrectness, cache incoherency, and memory leaking. Carefully read notes/Overlay.md before using the overlay.
   pub async fn read_with_overlay(&self, offset: u64, len: u64) -> Vec<u8> {
     if let Some(e) = self.overlay.get(&offset) {
-      assert_eq!(e.value().data.len(), usz!(len));
+      let overlay_len = e.value().data.len();
+      assert_eq!(
+        overlay_len,
+        usz!(len),
+        "overlay data at {offset} has length {overlay_len} but requested length {len}"
+      );
       e.value().data.clone()
     } else {
       self.device.read_at(offset, len).await
@@ -197,6 +202,7 @@ impl WriteJournal {
   }
 
   /// WARNING: Use this function with caution, it's up to the caller to avoid the potential issues with misuse, including logic incorrectness, cache incoherency, and memory leaking. Carefully read notes/Overlay.md before using the overlay.
+  /// WARNING: It's unlikely you want to to use this function, as it will cause cache coherency problems as this only removes the overlay entry, so stale device data will be read instead. You most likely want to write blank/default data instead. However, this is available if you know what you're doing and have a need.
   pub async fn clear_from_overlay(&self, offset: u64) {
     self.overlay.remove(&offset);
   }
