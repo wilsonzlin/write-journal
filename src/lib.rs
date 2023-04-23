@@ -1,3 +1,5 @@
+pub mod tinybuf;
+
 use dashmap::DashMap;
 use off64::int::Off64ReadInt;
 use off64::int::Off64WriteMutInt;
@@ -13,6 +15,7 @@ use std::hash::BuildHasherDefault;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
+use tinybuf::TinyBuf;
 use tokio::time::sleep;
 use tracing::info;
 use tracing::warn;
@@ -23,7 +26,7 @@ const OFFSETOF_ENTRIES: u64 = OFFSETOF_LEN + 4;
 
 struct TransactionWrite {
   offset: u64,
-  data: Vec<u8>,
+  data: TinyBuf,
   is_overlay: bool,
 }
 
@@ -45,7 +48,9 @@ impl Transaction {
     .unwrap()
   }
 
-  pub fn write(&mut self, offset: u64, data: Vec<u8>) -> &mut Self {
+  // Use generic so callers don't even need to `.into()` from Vec, array, etc.
+  pub fn write<D: Into<TinyBuf>>(&mut self, offset: u64, data: D) -> &mut Self {
+    let data = data.into();
     self.writes.push(TransactionWrite {
       offset,
       data,
@@ -55,7 +60,9 @@ impl Transaction {
   }
 
   /// WARNING: Use this function with caution, it's up to the caller to avoid the potential issues with misuse, including logic incorrectness, cache incoherency, and memory leaking. Carefully read notes/Overlay.md before using the overlay.
-  pub fn write_with_overlay(&mut self, offset: u64, data: Vec<u8>) -> &mut Self {
+  // Use generic so callers don't even need to `.into()` from Vec, array, etc.
+  pub fn write_with_overlay<D: Into<TinyBuf>>(&mut self, offset: u64, data: D) -> &mut Self {
+    let data = data.into();
     self.overlay.insert(offset, OverlayEntry {
       data: data.clone(),
       serial_no: self.serial_no,
@@ -72,7 +79,7 @@ impl Transaction {
 // We cannot evict an overlay entry after a commit loop iteration if the data at the offset has since been updated again using the overlay while the commit loop was happening. This is why we need to track `serial_no`. This mechanism requires slower one-by-one deletes by the commit loop, but allows much faster parallel overlay reads with a DashMap. The alternative would be a RwLock over two maps, one for each generation, swapping them around after each loop iteration.
 // Note that it's not necessary to ever evict for correctness (assuming the overlay is used correctly); eviction is done to avoid memory leaking.
 struct OverlayEntry {
-  data: Vec<u8>,
+  data: TinyBuf,
   serial_no: u64,
 }
 
@@ -187,7 +194,7 @@ impl WriteJournal {
   }
 
   /// WARNING: Use this function with caution, it's up to the caller to avoid the potential issues with misuse, including logic incorrectness, cache incoherency, and memory leaking. Carefully read notes/Overlay.md before using the overlay.
-  pub async fn read_with_overlay(&self, offset: u64, len: u64) -> Vec<u8> {
+  pub async fn read_with_overlay(&self, offset: u64, len: u64) -> TinyBuf {
     if let Some(e) = self.overlay.get(&offset) {
       let overlay_len = e.value().data.len();
       assert_eq!(
@@ -197,7 +204,7 @@ impl WriteJournal {
       );
       e.value().data.clone()
     } else {
-      self.device.read_at(offset, len).await
+      self.device.read_at(offset, len).await.into()
     }
   }
 
