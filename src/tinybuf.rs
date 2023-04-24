@@ -13,25 +13,34 @@ use std::mem::size_of;
 use std::ops::Deref;
 use std::sync::Arc;
 
+// TODO We assume that `usize` always represents the word size.
+#[allow(unused)]
 const WORD_SIZE: usize = size_of::<usize>();
 // One byte is taken up by the enum discriminant, and another byte by the length.
 // We chose 24 bytes because:
 // - It's very common to write 8 or 16 bytes, which would require 17 bytes (1 byte for the length). Due to padding, it becomes 24 bytes anyway.
 // - Many widely used types (Arc, Box, HashMap, Rc, Vec) are no more than 24 bytes, so it seems like a good cutoff.
 // - Three times the word size should still be fast to copy as a rule of thumb.
+#[allow(unused)]
 const ARRAY_CAP: usize = WORD_SIZE * 3 - 1;
 
-// TODO Currently we've designed and optimised this library for x86-64, and we assume that `usize` represents the word size. However, keep using abstraction vars/consts/macros/etc. instead of hardcoding numbers/assumptions so that when this assertion is removed everything keeps working.
+// TODO Currently we've designed and optimised this library for x86-64. However, keep using abstraction vars/consts/macros/etc. instead of hardcoding numbers/assumptions so that when this assertion is removed everything keeps working. What to change:
+// - TinyBuf::Vec `cap` array length and endianness.
+// - Amount of TinyBuf::Array* variants.
 static_assertions::const_assert_eq!(WORD_SIZE, 8);
 
 /// Immutable variable-length owned slice of bytes that tries to accept many different types (i.e. generic), similar to `Box<dyn AsRef<[u8]>>` but without boxing (i.e. heap allocation).
+///
+/// Unsupported types:
+/// - `Cow`: borrowed data, so requires either owned variant or 'static lifetime, both of which are already supported.
+/// - `Rc`: not `Send` and `Sync`.
 pub enum TinyBuf {
   Arc(Arc<dyn AsRef<[u8]> + Send + Sync + 'static>),
   BoxDyn(Box<dyn AsRef<[u8]> + Send + Sync + 'static>),
   BoxSlice(Box<[u8]>),
   Static(&'static [u8]),
   // This is separate from the Box variants as converting Vec to Box using `into_boxed_slice` will require a reallocation unless capacity is exactly the same as the length.
-  // A Vec takes up 3 * WORD_SIZE, which means if we also add the enum discriminant it becomes 4 * WORD_SIZE due to padding, which is too much (see earlier notes about why we picked 3 * WORD_SIZE). Therefore, we decompose a Vec into its raw parts, which means we have to shave off one byte somewhere; we picked `cap`, as it's the least used field. This limits `cap` to 2^56 on 64-bit systems, which should be more than enough. We store it as the first field, as we assume Rust will place the enum discriminant byte first, so this keeps `ptr` and `len` aligned. (This is an assumption because Rust struct layout is undefined.) We can't just discard `cap` because it's required for Vec to drop, presumably because Rust's allocator requires `Layout` when deallocating (not just the pointer).
+  // A Vec takes up 3 * WORD_SIZE, which means if we also add the enum discriminant it becomes 4 * WORD_SIZE due to padding, which is too much (see earlier notes about why we picked 3 * WORD_SIZE). Therefore, we decompose a Vec into its raw parts, which means we have to shave off one byte somewhere; we picked `cap`, as it's the least used field. This limits `cap` to 2^56 on 64-bit systems, which should be more than enough. We store it as the first field, as we assume Rust will place the enum discriminant byte first, so this keeps `ptr` and `len` aligned. (This is an assumption because Rust struct layout is undefined.) We can't just discard `cap` because it's required for Vec to drop, presumably because Rust's allocator requires `Layout` when deallocating (not just the pointer). We don't simply cast `cap` to u32 as it's not entirely unreasonable to have a Vec with more than 4 GiB of data.
   Vec {
     // We must choose an endianness, as otherwise we can't know which byte to discard. We choose little endian since most modern CPUs are.
     cap: [u8; 7],
@@ -65,7 +74,7 @@ pub enum TinyBuf {
   Array23([u8; 23]),
 }
 
-// We must manually impl as we store a pointer for the Vec variant.
+// We must manually impl as we store a pointer for the Vec variant. We can't extract Vec variant out into own struct buecause it would be padded to 3 * WORD_SIZE, which reverts the entire purpose of it.
 unsafe impl Send for TinyBuf {}
 unsafe impl Sync for TinyBuf {}
 
@@ -76,6 +85,38 @@ static_assertions::const_assert_eq!(size_of::<Box<dyn AsRef<[u8]>>>(), WORD_SIZE
 static_assertions::const_assert_eq!(size_of::<TinyBuf>(), WORD_SIZE * 3);
 
 impl TinyBuf {
+  /// This may heap allocate if the length is larger than `ARRAY_CAP`.
+  pub fn from_slice(s: &[u8]) -> Self {
+    match s.len() {
+      0 => TinyBuf::Array0(s.try_into().unwrap()),
+      1 => TinyBuf::Array1(s.try_into().unwrap()),
+      2 => TinyBuf::Array2(s.try_into().unwrap()),
+      3 => TinyBuf::Array3(s.try_into().unwrap()),
+      4 => TinyBuf::Array4(s.try_into().unwrap()),
+      5 => TinyBuf::Array5(s.try_into().unwrap()),
+      6 => TinyBuf::Array6(s.try_into().unwrap()),
+      7 => TinyBuf::Array7(s.try_into().unwrap()),
+      8 => TinyBuf::Array8(s.try_into().unwrap()),
+      9 => TinyBuf::Array9(s.try_into().unwrap()),
+      10 => TinyBuf::Array10(s.try_into().unwrap()),
+      11 => TinyBuf::Array11(s.try_into().unwrap()),
+      12 => TinyBuf::Array12(s.try_into().unwrap()),
+      13 => TinyBuf::Array13(s.try_into().unwrap()),
+      14 => TinyBuf::Array14(s.try_into().unwrap()),
+      15 => TinyBuf::Array15(s.try_into().unwrap()),
+      16 => TinyBuf::Array16(s.try_into().unwrap()),
+      17 => TinyBuf::Array17(s.try_into().unwrap()),
+      18 => TinyBuf::Array18(s.try_into().unwrap()),
+      19 => TinyBuf::Array19(s.try_into().unwrap()),
+      20 => TinyBuf::Array20(s.try_into().unwrap()),
+      21 => TinyBuf::Array21(s.try_into().unwrap()),
+      22 => TinyBuf::Array22(s.try_into().unwrap()),
+      23 => TinyBuf::Array23(s.try_into().unwrap()),
+      // Prefer `Box<[u8]>` over `Vec<u8>` as our Vec variant is a bit slower.
+      _ => s.to_vec().into_boxed_slice().into(),
+    }
+  }
+
   pub fn as_slice(&self) -> &[u8] {
     match self {
       // The first `as_ref` is on Arc, the second is on `AsRef`. Arc::as_ref returns a reference to the contained value.
@@ -156,36 +197,7 @@ impl Clone for TinyBuf {
       TinyBuf::Array21(v) => TinyBuf::Array21(v.clone()),
       TinyBuf::Array22(v) => TinyBuf::Array22(v.clone()),
       TinyBuf::Array23(v) => TinyBuf::Array23(v.clone()),
-      v => {
-        let s = v.as_slice();
-        match s.len() {
-          0 => TinyBuf::Array0(s.try_into().unwrap()),
-          1 => TinyBuf::Array1(s.try_into().unwrap()),
-          2 => TinyBuf::Array2(s.try_into().unwrap()),
-          3 => TinyBuf::Array3(s.try_into().unwrap()),
-          4 => TinyBuf::Array4(s.try_into().unwrap()),
-          5 => TinyBuf::Array5(s.try_into().unwrap()),
-          6 => TinyBuf::Array6(s.try_into().unwrap()),
-          7 => TinyBuf::Array7(s.try_into().unwrap()),
-          8 => TinyBuf::Array8(s.try_into().unwrap()),
-          9 => TinyBuf::Array9(s.try_into().unwrap()),
-          10 => TinyBuf::Array10(s.try_into().unwrap()),
-          11 => TinyBuf::Array11(s.try_into().unwrap()),
-          12 => TinyBuf::Array12(s.try_into().unwrap()),
-          13 => TinyBuf::Array13(s.try_into().unwrap()),
-          14 => TinyBuf::Array14(s.try_into().unwrap()),
-          15 => TinyBuf::Array15(s.try_into().unwrap()),
-          16 => TinyBuf::Array16(s.try_into().unwrap()),
-          17 => TinyBuf::Array17(s.try_into().unwrap()),
-          18 => TinyBuf::Array18(s.try_into().unwrap()),
-          19 => TinyBuf::Array19(s.try_into().unwrap()),
-          20 => TinyBuf::Array20(s.try_into().unwrap()),
-          21 => TinyBuf::Array21(s.try_into().unwrap()),
-          22 => TinyBuf::Array22(s.try_into().unwrap()),
-          23 => TinyBuf::Array23(s.try_into().unwrap()),
-          _ => s.to_vec().into(),
-        }
-      }
+      v => Self::from_slice(v.as_slice()),
     }
   }
 }
@@ -226,6 +238,7 @@ impl Drop for TinyBuf {
   fn drop(&mut self) {
     match self {
       TinyBuf::Vec { cap, ptr, len } => {
+        // See comments at TinyBuf::Vec declaration.
         let cap = usz!(cap.read_u56_le_at(0));
         unsafe {
           Vec::from_raw_parts(ptr, *len, cap);
@@ -262,8 +275,10 @@ impl From<&'static [u8]> for TinyBuf {
 
 impl From<Vec<u8>> for TinyBuf {
   fn from(value: Vec<u8>) -> Self {
-    // See comments at enum variant declaration.
+    // See comments at TinyBuf::Vec declaration.
     let ptr = value.as_ptr();
+    let cap = u64!(value.capacity());
+    assert!(cap < (1 << 56));
     let cap = create_u56_le(u64!(value.capacity()));
     let len = value.len();
     forget(value);
