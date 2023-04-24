@@ -1,5 +1,3 @@
-pub mod tinybuf;
-
 use dashmap::DashMap;
 use off64::int::Off64ReadInt;
 use off64::int::Off64WriteMutInt;
@@ -12,6 +10,7 @@ use seekable_async_file::WriteRequest;
 use signal_future::SignalFuture;
 use signal_future::SignalFutureController;
 use std::hash::BuildHasherDefault;
+use std::iter::once;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
@@ -128,13 +127,17 @@ impl WriteJournal {
   }
 
   pub async fn recover(&self) {
-    let mut raw = self.device.read_at(self.offset, OFFSETOF_ENTRIES).await;
+    let mut raw = self
+      .device
+      .read_at(self.offset, OFFSETOF_ENTRIES)
+      .await
+      .to_vec();
     let len: u64 = raw.read_u32_be_at(OFFSETOF_LEN).into();
     if len > self.capacity - OFFSETOF_ENTRIES {
       warn!("journal is corrupt, has invalid length, skipping recovery");
       return;
     };
-    raw.append(
+    raw.extend_from_slice(
       &mut self
         .device
         .read_at(self.offset + OFFSETOF_ENTRIES, len)
@@ -157,7 +160,7 @@ impl WriteJournal {
       journal_offset += 8;
       let data_len = raw.read_u32_be_at(journal_offset);
       journal_offset += 4;
-      let data = raw.read_at(journal_offset, data_len.into()).to_vec();
+      let data = TinyBuf::from_slice(raw.read_at(journal_offset, data_len.into()));
       journal_offset += u64::from(data_len);
       self.device.write_at(offset, data).await;
       recovered_bytes_total += data_len;
@@ -217,14 +220,15 @@ impl WriteJournal {
   pub async fn start_commit_background_loop(&self) {
     let mut next_serial = 0;
 
+    // These are outside and cleared after each iteration to avoid reallocations.
+    let mut writes = Vec::new();
+    let mut fut_ctls = Vec::new();
+    let mut overlays_to_delete = Vec::new();
     loop {
       sleep(self.commit_delay).await;
 
       let mut len = 0;
       let mut raw = vec![0u8; usz!(OFFSETOF_ENTRIES)];
-      let mut writes = Vec::new();
-      let mut fut_ctls = Vec::new();
-      let mut overlays_to_delete = Vec::new();
       // We must `remove` to take ownership of the write data and avoid copying. But this means we need to reinsert into the map if we cannot process a transaction in this iteration.
       while let Some((serial_no, (txn, fut_ctl))) = self.pending.remove(&next_serial) {
         let entry_len = txn.serialised_byte_len();
@@ -250,6 +254,9 @@ impl WriteJournal {
         fut_ctls.push(fut_ctl);
       }
       if fut_ctls.is_empty() {
+        // Assert these are empty as each iteration expects to start with cleared reused Vec values.
+        assert!(overlays_to_delete.is_empty());
+        assert!(writes.is_empty());
         continue;
       };
       raw.write_u32_be_at(OFFSETOF_LEN, u32::try_from(len).unwrap());
@@ -257,16 +264,19 @@ impl WriteJournal {
       raw.write_at(OFFSETOF_HASH, hash.as_bytes());
       self
         .device
-        .write_at_with_delayed_sync(vec![WriteRequest::new(self.offset, raw)])
+        .write_at_with_delayed_sync(once(WriteRequest::new(self.offset, raw)))
         .await;
 
-      self.device.write_at_with_delayed_sync(writes).await;
+      self
+        .device
+        .write_at_with_delayed_sync(writes.drain(..))
+        .await;
 
-      for fut_ctl in fut_ctls {
+      for fut_ctl in fut_ctls.drain(..) {
         fut_ctl.signal();
       }
 
-      for (offset, serial_no) in overlays_to_delete {
+      for (offset, serial_no) in overlays_to_delete.drain(..) {
         self
           .overlay
           .remove_if(&offset, |_, e| e.serial_no <= serial_no);
