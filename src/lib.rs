@@ -165,6 +165,9 @@ impl WriteJournal {
       self.device.write_at(offset, data).await;
       recovered_bytes_total += data_len;
     }
+    self.device.sync_data().await;
+
+    // WARNING: Make sure to sync writes BEFORE erasing journal.
     self
       .device
       .write_at(self.offset, self.generate_blank_state())
