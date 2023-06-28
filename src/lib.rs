@@ -276,7 +276,7 @@ impl WriteJournal {
         .await;
 
       for fut_ctl in fut_ctls.drain(..) {
-        fut_ctl.signal();
+        fut_ctl.signal(());
       }
 
       for (offset, serial_no) in overlays_to_delete.drain(..) {
